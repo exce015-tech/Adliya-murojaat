@@ -265,9 +265,16 @@ CSS = """
 html, body, [class*="css"]  { font-family: 'Inter', sans-serif; }
 .stApp { background-color: #EEF1F6; }
 
-/* ---- Streamlit'ning standart yuqori panelini (Deploy tugmasi, ⋮ menyu) yashirish ---- */
-header[data-testid="stHeader"] { display: none !important; }
-div[data-testid="stToolbar"] { display: none !important; }
+/* ---- Streamlit'ning standart yuqori panelini (Deploy tugmasi, ⋮ menyu) yashirish ----
+   DIQQAT: header'ni butunlay "display:none" qilib bo'lmaydi — sidebar'ni ochish/yopish
+   strelkasi ham shu header ichida joylashgan. Shuning uchun uni shaffof qilamiz va
+   faqat Deploy tugmasi bilan ⋮ menyusini yashiramiz, strelka joyida qoladi. */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+    box-shadow: none !important;
+    height: 3rem;
+}
+div[data-testid="stToolbarActions"] { display: none !important; }
 div[data-testid="stDecoration"] { display: none !important; }
 div[data-testid="stStatusWidget"] { display: none !important; }
 #MainMenu { visibility: hidden !important; }
@@ -276,8 +283,6 @@ footer { visibility: hidden !important; }
 .block-container { padding-top: 1.5rem !important; }
 
 h1, h2, h3 { font-family: 'Spectral', serif !important; color: #16233B; }
-
-.block-container { padding-top: 1.2rem; }
 
 /* ---- Top navbar (regulation.gov.uz uslubida) ---- */
 .adl-navbar {
