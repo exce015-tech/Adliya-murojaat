@@ -5,7 +5,10 @@ shared.py — ADLIYA-ALOQA uchun umumiy modul
 Bu fayl o'zi ishga tushmaydi! U fuqaro_app.py va adliya_app.py ikkalasi
 tomonidan import qilinadi va ular o'rtasida umumiy narsalarni ta'minlaydi:
 
-  - Bitta SQLite baza (adliya_fikr.db) — ikkala sayt shu bazaga yozadi/o'qiydi.
+  - Bitta umumiy Turso (libSQL) bulutli bazasi — ikkala sayt (garchi ular
+    ikki mustaqil Streamlit Cloud ilovasi bo'lsa ham) shu bir bazaga
+    yozadi/o'qiydi. Ulanish maʼlumotlari (URL, token) Streamlit "Secrets"
+    orqali TURSO_DATABASE_URL va TURSO_AUTH_TOKEN nomlari bilan beriladi.
   - Umumiy konstantalar (soha ro'yxati, status bosqichlari va h.k.)
   - Umumiy CSS va vizual dizayn (regulation.gov.uz uslubiga yaqin: yuqori
     panel, loyiha-kartochka ko'rinishi, meta ma'lumotlar qatori).
@@ -14,18 +17,11 @@ tomonidan import qilinadi va ular o'rtasida umumiy narsalarni ta'minlaydi:
   - Test murojaatlarni o'chirish funksiyalari (Adliya paneli uchun).
 """
 
-import os
 import html
-import sqlite3
 import datetime
 import pandas as pd
 import streamlit as st
-
-# --------------------------------------------------------------------------
-# BAZA YO'LI
-# --------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "adliya_fikr.db")
+import libsql_client
 
 SOHALAR = [
     "Tadbirkorlik va litsenziyalash",
@@ -51,11 +47,26 @@ TOZALASH_KALITI = "O'CHIRISH"       # bulk-tozalashni tasdiqlash uchun yozilishi
 
 
 # --------------------------------------------------------------------------
-# MA'LUMOTLAR BAZASI
+# MA'LUMOTLAR BAZASI — Turso (libSQL), bulutda, ikkala sayt umumiy foydalanadi
 # --------------------------------------------------------------------------
-def db_connect():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("""
+@st.cache_resource
+def _client():
+    """Turso bazasiga ulanish. URL va token Streamlit Cloud 'Secrets'
+    bo'limidan olinadi (mahalliy testda .streamlit/secrets.toml orqali)."""
+    try:
+        url = st.secrets["TURSO_DATABASE_URL"]
+        token = st.secrets["TURSO_AUTH_TOKEN"]
+    except Exception:
+        st.error(
+            "⚠️ Turso ulanish maʼlumotlari topilmadi.\n\n"
+            "Streamlit Cloud'da bu ilovaning **Settings → Secrets** bo'limiga quyidagilarni qo'shing:\n\n"
+            "```\nTURSO_DATABASE_URL = \"libsql://sizning-bazangiz.turso.io\"\n"
+            "TURSO_AUTH_TOKEN = \"sizning-tokeningiz\"\n```"
+        )
+        st.stop()
+
+    client = libsql_client.create_client_sync(url=url, auth_token=token)
+    client.execute("""
         CREATE TABLE IF NOT EXISTS murojaatlar (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sana TEXT,
@@ -71,7 +82,7 @@ def db_connect():
             ovoz INTEGER DEFAULT 0
         )
     """)
-    conn.execute("""
+    client.execute("""
         CREATE TABLE IF NOT EXISTS ovozlar (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             murojaat_id INTEGER,
@@ -80,60 +91,48 @@ def db_connect():
             UNIQUE(murojaat_id, voter)
         )
     """)
-    conn.commit()
-    return conn
+    return client
+
 
 
 def yangi_murojaat_qoshish(ism, kontakt, soha, sarlavha, tavsif, asos):
-    conn = db_connect()
-    conn.execute(
+    _client().execute(
         """INSERT INTO murojaatlar
            (sana, ism, kontakt, soha, sarlavha, tavsif, asos, status, xulosa_turi, xulosa_matni, ovoz)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-        (
+        [
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             ism, kontakt, soha, sarlavha, tavsif, asos,
             STATUSLAR[0], XULOSA_TURLARI[0], "",
-        ),
+        ],
     )
-    conn.commit()
-    conn.close()
 
 
 def barcha_murojaatlar():
-    conn = db_connect()
-    df = pd.read_sql_query("SELECT * FROM murojaatlar ORDER BY id DESC", conn)
-    conn.close()
+    rs = _client().execute("SELECT * FROM murojaatlar ORDER BY id DESC")
+    rows = [tuple(r) for r in rs.rows]
+    df = pd.DataFrame(rows, columns=list(rs.columns))
     return df
 
 
 def murojaatni_yangilash(mid, status, xulosa_turi, xulosa_matni):
-    conn = db_connect()
-    conn.execute(
+    _client().execute(
         "UPDATE murojaatlar SET status=?, xulosa_turi=?, xulosa_matni=? WHERE id=?",
-        (status, xulosa_turi, xulosa_matni, mid),
+        [status, xulosa_turi, xulosa_matni, mid],
     )
-    conn.commit()
-    conn.close()
 
 
 def murojaatni_ochirish(mid):
     """Bitta murojaatni (masalan, test yozuvini) butunlay o'chiradi."""
-    conn = db_connect()
-    conn.execute("DELETE FROM murojaatlar WHERE id=?", (mid,))
-    conn.execute("DELETE FROM ovozlar WHERE murojaat_id=?", (mid,))
-    conn.commit()
-    conn.close()
+    _client().execute("DELETE FROM murojaatlar WHERE id=?", [mid])
+    _client().execute("DELETE FROM ovozlar WHERE murojaat_id=?", [mid])
 
 
 def hammasini_tozalash():
     """DIQQAT: barcha murojaatlarni butunlay o'chiradi. Faqat test ma'lumotlarini
     tozalash uchun ishlatiladi."""
-    conn = db_connect()
-    conn.execute("DELETE FROM murojaatlar")
-    conn.execute("DELETE FROM ovozlar")
-    conn.commit()
-    conn.close()
+    _client().execute("DELETE FROM murojaatlar")
+    _client().execute("DELETE FROM ovozlar")
 
 
 # --------------------------------------------------------------------------
@@ -143,12 +142,10 @@ def ovoz_berganmi(mid, voter):
     voter = (voter or "").strip().lower()
     if not voter:
         return False
-    conn = db_connect()
-    row = conn.execute(
-        "SELECT 1 FROM ovozlar WHERE murojaat_id=? AND voter=?", (mid, voter)
-    ).fetchone()
-    conn.close()
-    return row is not None
+    rs = _client().execute(
+        "SELECT 1 FROM ovozlar WHERE murojaat_id=? AND voter=?", [mid, voter]
+    )
+    return len(rs.rows) > 0
 
 
 def ovoz_qoshish(mid, voter):
@@ -156,19 +153,17 @@ def ovoz_qoshish(mid, voter):
     voter = (voter or "").strip().lower()
     if not voter:
         return False
-    conn = db_connect()
+    if ovoz_berganmi(mid, voter):
+        return False
     try:
-        conn.execute(
+        _client().execute(
             "INSERT INTO ovozlar (murojaat_id, voter, sana) VALUES (?, ?, ?)",
-            (mid, voter, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+            [mid, voter, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")],
         )
-        conn.execute("UPDATE murojaatlar SET ovoz = ovoz + 1 WHERE id=?", (mid,))
-        conn.commit()
-        ok = True
-    except sqlite3.IntegrityError:
-        ok = False
-    conn.close()
-    return ok
+        _client().execute("UPDATE murojaatlar SET ovoz = ovoz + 1 WHERE id=?", [mid])
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -306,7 +301,17 @@ h1, h2, h3 { font-family: 'Spectral', serif !important; color: #16233B; }
 .adl-breadcrumb b { color: #4A5064; }
 
 /* ---- Sidebar ---- */
-section[data-testid="stSidebar"] { background-color: #16233B; }
+section[data-testid="stSidebar"],
+section[data-testid="stSidebar"] > div,
+div[data-testid="stSidebarContent"],
+div[data-testid="stSidebarUserContent"],
+div[data-testid="stSidebarNav"],
+nav[data-testid="stSidebarNav"],
+div[data-testid="stSidebarNavItems"],
+div[data-testid="stSidebarNavSeparator"] {
+    background-color: #16233B !important;
+}
+section[data-testid="stSidebar"] { min-height: 100vh; }
 section[data-testid="stSidebar"] * { color: #E9EAF0 !important; }
 section[data-testid="stSidebar"] .adl-sidebar-logo {
     font-family: 'IBM Plex Mono', monospace; letter-spacing: 2px; font-size: 13px;
@@ -319,6 +324,15 @@ section[data-testid="stSidebar"] .stButton>button {
 }
 section[data-testid="stSidebar"] .stButton>button:hover {
     background-color: #C89B3C; color: #16233B !important;
+}
+/* Streamlit'ning avtomatik sahifa-nav havolalari (Fuqaro / Adliya paneli) */
+div[data-testid="stSidebarNav"] a,
+div[data-testid="stSidebarNav"] span {
+    color: #E9EAF0 !important;
+}
+div[data-testid="stSidebarNav"] a[aria-current="page"] {
+    background-color: rgba(200,155,60,0.18) !important;
+    border-radius: 6px;
 }
 
 /* ---- Buttons ---- */
