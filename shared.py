@@ -5,23 +5,33 @@ shared.py — ADLIYA-ALOQA uchun umumiy modul
 Bu fayl o'zi ishga tushmaydi! U fuqaro_app.py va adliya_app.py ikkalasi
 tomonidan import qilinadi va ular o'rtasida umumiy narsalarni ta'minlaydi:
 
-  - Bitta umumiy Turso (libSQL) bulutli bazasi — ikkala sayt (garchi ular
-    ikki mustaqil Streamlit Cloud ilovasi bo'lsa ham) shu bir bazaga
-    yozadi/o'qiydi. Ulanish maʼlumotlari (URL, token) Streamlit "Secrets"
-    orqali TURSO_DATABASE_URL va TURSO_AUTH_TOKEN nomlari bilan beriladi.
+  - Bitta SQLite baza (adliya_fikr.db) — ikkala sayt shu bazaga yozadi/o'qiydi.
   - Umumiy konstantalar (soha ro'yxati, status bosqichlari va h.k.)
   - Umumiy CSS va vizual dizayn (regulation.gov.uz uslubiga yaqin: yuqori
     panel, loyiha-kartochka ko'rinishi, meta ma'lumotlar qatori).
   - Bir kishi bir murojaatga faqat bir marta ovoz bera olishini ta'minlovchi
     mexanizm (kontakt/telefon asosida).
   - Test murojaatlarni o'chirish funksiyalari (Adliya paneli uchun).
+
+  ESLATMA: bu versiya oddiy mahalliy SQLite fayl bilan ishlaydi (Turso
+  shart emas). Agar kelajakda ikkita alohida Streamlit Cloud ilova
+  o'rtasida ma'lumot ulashish kerak bo'lsa (masalan ikkalasi alohida
+  linkda bo'lsa-yu, bitta bazani ko'rishi kerak bo'lsa), Turso yoki
+  boshqa bulutli bazaga o'tish talab qilinadi.
 """
 
+import os
 import html
+import sqlite3
 import datetime
 import pandas as pd
 import streamlit as st
-import libsql_client
+
+# --------------------------------------------------------------------------
+# BAZA YO'LI
+# --------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "adliya_fikr.db")
 
 SOHALAR = [
     "Tadbirkorlik va litsenziyalash",
@@ -47,26 +57,11 @@ TOZALASH_KALITI = "O'CHIRISH"       # bulk-tozalashni tasdiqlash uchun yozilishi
 
 
 # --------------------------------------------------------------------------
-# MA'LUMOTLAR BAZASI — Turso (libSQL), bulutda, ikkala sayt umumiy foydalanadi
+# MA'LUMOTLAR BAZASI
 # --------------------------------------------------------------------------
-@st.cache_resource
-def _client():
-    """Turso bazasiga ulanish. URL va token Streamlit Cloud 'Secrets'
-    bo'limidan olinadi (mahalliy testda .streamlit/secrets.toml orqali)."""
-    try:
-        url = st.secrets["TURSO_DATABASE_URL"]
-        token = st.secrets["TURSO_AUTH_TOKEN"]
-    except Exception:
-        st.error(
-            "⚠️ Turso ulanish maʼlumotlari topilmadi.\n\n"
-            "Streamlit Cloud'da bu ilovaning **Settings → Secrets** bo'limiga quyidagilarni qo'shing:\n\n"
-            "```\nTURSO_DATABASE_URL = \"libsql://sizning-bazangiz.turso.io\"\n"
-            "TURSO_AUTH_TOKEN = \"sizning-tokeningiz\"\n```"
-        )
-        st.stop()
-
-    client = libsql_client.create_client_sync(url=url, auth_token=token)
-    client.execute("""
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS murojaatlar (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sana TEXT,
@@ -82,7 +77,7 @@ def _client():
             ovoz INTEGER DEFAULT 0
         )
     """)
-    client.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS ovozlar (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             murojaat_id INTEGER,
@@ -91,48 +86,60 @@ def _client():
             UNIQUE(murojaat_id, voter)
         )
     """)
-    return client
-
+    conn.commit()
+    return conn
 
 
 def yangi_murojaat_qoshish(ism, kontakt, soha, sarlavha, tavsif, asos):
-    _client().execute(
+    conn = db_connect()
+    conn.execute(
         """INSERT INTO murojaatlar
            (sana, ism, kontakt, soha, sarlavha, tavsif, asos, status, xulosa_turi, xulosa_matni, ovoz)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-        [
+        (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             ism, kontakt, soha, sarlavha, tavsif, asos,
             STATUSLAR[0], XULOSA_TURLARI[0], "",
-        ],
+        ),
     )
+    conn.commit()
+    conn.close()
 
 
 def barcha_murojaatlar():
-    rs = _client().execute("SELECT * FROM murojaatlar ORDER BY id DESC")
-    rows = [tuple(r) for r in rs.rows]
-    df = pd.DataFrame(rows, columns=list(rs.columns))
+    conn = db_connect()
+    df = pd.read_sql_query("SELECT * FROM murojaatlar ORDER BY id DESC", conn)
+    conn.close()
     return df
 
 
 def murojaatni_yangilash(mid, status, xulosa_turi, xulosa_matni):
-    _client().execute(
+    conn = db_connect()
+    conn.execute(
         "UPDATE murojaatlar SET status=?, xulosa_turi=?, xulosa_matni=? WHERE id=?",
-        [status, xulosa_turi, xulosa_matni, mid],
+        (status, xulosa_turi, xulosa_matni, mid),
     )
+    conn.commit()
+    conn.close()
 
 
 def murojaatni_ochirish(mid):
     """Bitta murojaatni (masalan, test yozuvini) butunlay o'chiradi."""
-    _client().execute("DELETE FROM murojaatlar WHERE id=?", [mid])
-    _client().execute("DELETE FROM ovozlar WHERE murojaat_id=?", [mid])
+    conn = db_connect()
+    conn.execute("DELETE FROM murojaatlar WHERE id=?", (mid,))
+    conn.execute("DELETE FROM ovozlar WHERE murojaat_id=?", (mid,))
+    conn.commit()
+    conn.close()
 
 
 def hammasini_tozalash():
     """DIQQAT: barcha murojaatlarni butunlay o'chiradi. Faqat test ma'lumotlarini
     tozalash uchun ishlatiladi."""
-    _client().execute("DELETE FROM murojaatlar")
-    _client().execute("DELETE FROM ovozlar")
+    conn = db_connect()
+    conn.execute("DELETE FROM murojaatlar")
+    conn.execute("DELETE FROM ovozlar")
+    conn.commit()
+    conn.close()
 
 
 # --------------------------------------------------------------------------
@@ -142,10 +149,12 @@ def ovoz_berganmi(mid, voter):
     voter = (voter or "").strip().lower()
     if not voter:
         return False
-    rs = _client().execute(
-        "SELECT 1 FROM ovozlar WHERE murojaat_id=? AND voter=?", [mid, voter]
-    )
-    return len(rs.rows) > 0
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT 1 FROM ovozlar WHERE murojaat_id=? AND voter=?", (mid, voter)
+    ).fetchone()
+    conn.close()
+    return row is not None
 
 
 def ovoz_qoshish(mid, voter):
@@ -153,17 +162,19 @@ def ovoz_qoshish(mid, voter):
     voter = (voter or "").strip().lower()
     if not voter:
         return False
-    if ovoz_berganmi(mid, voter):
-        return False
+    conn = db_connect()
     try:
-        _client().execute(
+        conn.execute(
             "INSERT INTO ovozlar (murojaat_id, voter, sana) VALUES (?, ?, ?)",
-            [mid, voter, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")],
+            (mid, voter, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
         )
-        _client().execute("UPDATE murojaatlar SET ovoz = ovoz + 1 WHERE id=?", [mid])
-        return True
-    except Exception:
-        return False
+        conn.execute("UPDATE murojaatlar SET ovoz = ovoz + 1 WHERE id=?", (mid,))
+        conn.commit()
+        ok = True
+    except sqlite3.IntegrityError:
+        ok = False
+    conn.close()
+    return ok
 
 
 # --------------------------------------------------------------------------
